@@ -225,13 +225,36 @@ def _today_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
+def _window_span(days: int) -> int:
+    """Amplitude en jours de la fenêtre, plafonnée à MAX_DAYS (accès anonyme)."""
+    return max(1, min(int(days), MAX_DAYS) - 1)
+
+
 def _window(days: int) -> tuple:
     """
     Fenêtre de dates (start, ends) au format ISO8601 Z, plafonnée à 14 jours.
     Un utilisateur anonyme reçoit 403 au-delà ; `days` = nombre de points journaliers.
     """
-    span = max(1, min(int(days), MAX_DAYS) - 1)
-    return _days_ago_iso(span), _now_iso()
+    return _days_ago_iso(_window_span(days)), _now_iso()
+
+
+def _effective_days(days: int) -> int:
+    """Nombre de jours réellement couverts par la fenêtre (points journaliers renvoyés)."""
+    return _window_span(days) + 1
+
+
+def _window_label(days: int) -> str:
+    """
+    Étiquette de fenêtre pour les bandeaux : jours RÉELLEMENT couverts, plus une
+    note quand la demande a été plafonnée (MAX_DAYS = accès anonyme).
+    """
+    requested = int(days)
+    eff = _effective_days(requested)
+    if eff == requested:
+        return f"{eff} j"
+    if requested > MAX_DAYS:
+        return f"{eff} j — {requested} j demandés, plafonné à {MAX_DAYS} j (accès anonyme)"
+    return f"{eff} j (fenêtre effective, {requested} j demandés)"
 
 
 def _enum(value: str, allowed: tuple, label: str) -> str:
@@ -537,14 +560,14 @@ if __name__ == "__main__":
             name = _arg(2, "ccus")
             place_id = _int_arg(3, DEFAULT_PLACE_ID)
             days = _int_arg(4, MAX_DAYS)
-            print(f"=== Graphique '{name}' — expérience {place_id} ({days} j) ===")
+            print(f"=== Graphique '{name}' — expérience {place_id} ({_window_label(days)}) ===")
             pp(chart(name=name, place_id=place_id, timeslice="day", days=days))
 
         elif cmd == "genre-chart":
             name = _arg(2, "genre-ccus")
             genre = _arg(3, DEFAULT_GENRE)
             days = _int_arg(4, MAX_DAYS)
-            print(f"=== Graphique '{name}' — genre {genre} ({days} j) ===")
+            print(f"=== Graphique '{name}' — genre {genre} ({_window_label(days)}) ===")
             pp(chart(name=name, genre=genre, timeslice="day", days=days))
 
         elif cmd == "table":
@@ -630,7 +653,7 @@ if __name__ == "__main__":
         elif cmd == "total-visits":
             pid = _int_arg(2, DEFAULT_PLACE_ID)
             days = _int_arg(3, MAX_DAYS)
-            print(f"=== Visites totales — expérience {pid} ({days} j) ===")
+            print(f"=== Visites totales — expérience {pid} ({_window_label(days)}) ===")
             pp(total_visits(place_id=pid, days=days))
 
         elif cmd == "wallboard":
