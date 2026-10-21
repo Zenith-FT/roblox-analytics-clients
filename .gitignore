@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Swarm working notes (plan / briefs / blueprint) — not part of the deliverable
+.swarm/
+
+# Research notes
+.research/
+
+# Local secrets / caches
+tokens.json
+*.config.json
