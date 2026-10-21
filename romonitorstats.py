@@ -19,9 +19,13 @@ Points d'attention de l'API (voir .research/romonitorstats.md) :
     puis en-tête X-XSRF-TOKEN (valeur du cookie XSRF-TOKEN décodée)
   - les erreurs sont des {"message": "..."} ; 429 = "Too Many Attempts." (+ retry-after)
   - limite de débit : 80 requêtes/minute/IP (300 pour les graphiques)
+  - la clé Meilisearch (recherche) est extraite du bundle de la SPA à l'exécution
+    et peut être forcée via la variable d'environnement ROMONITOR_SEARCH_KEY
 """
 
 import json
+import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from curl_cffi import requests
@@ -38,8 +42,14 @@ SITE_URL = "https://romonitorstats.com"
 BASE_URL = "https://romonitorstats.com/api/v1"
 CSRF_URL = "https://romonitorstats.com/sanctum/csrf-cookie/"
 SEARCH_URL = "https://search.romonitorstats.com"
-# Clé publique (search-only) embarquée dans le bundle de la SPA RoMonitor.
-SEARCH_KEY = "MEILISEARCH_KEY_REDACTED"
+# Clé publique (search-only) de l'instance Meilisearch de RoMonitor.
+# Elle est publiée dans le bundle de la SPA : on l'extrait à l'exécution plutôt
+# que de l'embarquer dans le source (le nom du chunk est content-hashé, donc
+# l'extraction suit les redéploiements). Elle peut être forcée par variable
+# d'environnement pour les environnements hors ligne / restreints.
+SEARCH_KEY_ENV = "ROMONITOR_SEARCH_KEY"
+# Cache de la clé résolue (une seule extraction par processus).
+_SEARCH_KEY = None
 
 # ─── Headers de base ──────────────────────────────────────────────────────────
 # L'API vit sous /api/v1 sur le même domaine que le site → sec-fetch-site: same-origin.
@@ -59,10 +69,10 @@ BASE_HEADERS = {
 }
 
 # Hôte de recherche séparé (Meilisearch) : requête cross-site.
+# L'en-tête d'autorisation est ajouté à l'appel (clé résolue à l'exécution).
 SEARCH_HEADERS = {
     "accept": "application/json",
     "content-type": "application/json",
-    "authorization": "Bearer " + SEARCH_KEY,
 }
 
 TIMEOUT = 30
@@ -182,6 +192,52 @@ def _get(path: str, params: dict = None, base: str = None, headers: dict = None)
     resp = requests.get(url, params=params, headers=headers or BASE_HEADERS,
                         impersonate="chrome", timeout=TIMEOUT)
     return _decode(resp)
+
+
+def _fetch_text(url: str) -> str:
+    """Récupère un corps texte (HTML / JS) : même style de requête que _get, sans décodage JSON."""
+    headers = {**BASE_HEADERS, "accept": "text/html,application/javascript,*/*;q=0.8"}
+    resp = requests.get(url, headers=headers, impersonate="chrome", timeout=TIMEOUT)
+    if resp.status_code != 200:
+        raise ApiError(f"HTTP {resp.status_code} sur {url}")
+    return resp.text
+
+
+def _search_key() -> str:
+    """
+    Clé Meilisearch (search-only) de RoMonitor, extraite du bundle de la SPA.
+    Variable d'environnement ROMONITOR_SEARCH_KEY prioritaire ; sinon le chunk
+    Search.<hash>.js est téléchargé depuis le site et la clé en est lue.
+    Le résultat est mis en cache pour le processus courant.
+    """
+    global _SEARCH_KEY
+    if _SEARCH_KEY:
+        return _SEARCH_KEY
+    forced = (os.environ.get(SEARCH_KEY_ENV) or "").strip()
+    if forced:
+        _SEARCH_KEY = forced
+        return forced
+    try:
+        html = _fetch_text(SITE_URL + "/")
+        chunk = re.search(r"Search\.[a-f0-9]+\.js", html)
+        if not chunk:
+            raise ApiError("chunk Search.*.js introuvable dans le HTML du site")
+        js = _fetch_text(f"{SITE_URL}/stats-dist/js/{chunk.group(0)}")
+        key = re.search(r'"([A-Fa-f0-9]{64})"', js)
+        if not key:
+            raise ApiError("clé Meilisearch introuvable dans le chunk JS")
+    except ApiError:
+        raise ApiError(
+            f"clé Meilisearch introuvable dans le bundle de la SPA — "
+            f"définissez {SEARCH_KEY_ENV}"
+        )
+    except Exception as e:
+        raise ApiError(
+            f"clé Meilisearch introuvable dans le bundle de la SPA ({e}) — "
+            f"définissez {SEARCH_KEY_ENV}"
+        )
+    _SEARCH_KEY = key.group(1)
+    return _SEARCH_KEY
 
 
 def _csrf(session) -> str:
@@ -440,12 +496,15 @@ def search_games(term: str, limit: int = 10) -> list:
     """
     Recherche plein texte d'expériences (index Meilisearch `games_index`).
     Renvoie les hits enrichis : joueurs, visites, note, likes, créateur.
+    La clé d'authentification Meilisearch est extraite du bundle de la SPA
+    à l'exécution (voir _search_key()).
 
     Endpoint : POST https://search.romonitorstats.com/indexes/games_index/search
     """
+    headers = {**SEARCH_HEADERS, "authorization": "Bearer " + _search_key()}
     data = _check(_post("/indexes/games_index/search",
                         body={"q": term, "limit": int(limit)},
-                        base=SEARCH_URL, headers=SEARCH_HEADERS))
+                        base=SEARCH_URL, headers=headers))
     return data.get("hits", []) if isinstance(data, dict) else []
 
 
@@ -708,6 +767,8 @@ Exemples :
 
 Aucune authentification n'est requise : tous les endpoints publics sont en lecture seule.
 Les endpoints POST utilisent automatiquement un jeton CSRF Laravel, sans compte.
+La clé de recherche Meilisearch est extraite du bundle du site à l'exécution ; elle
+peut être forcée via la variable d'environnement ROMONITOR_SEARCH_KEY.
 """)
 
     except ApiError as e:
